@@ -1,0 +1,100 @@
+name: Publish to Chocolatey
+
+on:
+  release:
+    types: [published]
+
+env:
+  CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Chocolatey
+        uses: crazy-max/ghaction-chocolatey@v3
+        with:
+          args: -v
+          
+      - name: Get version from tag
+        id: get_version
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          $version = $version -replace '^v',''
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+          
+      - name: Create Chocolatey package
+        run: |
+          mkdir choco
+          cd choco
+          
+          # Create package structure
+          choco new apidash --version=${{ steps.get_version.outputs.VERSION }} maintainername="foss42" maintainerrepo="https://github.com/foss42/apidash"
+          
+          # Download release assets
+          Invoke-WebRequest -Uri "${{ github.event.release.assets[0].browser_download_url }}" -OutFile "apidash.exe"
+          
+          # Update chocolateyinstall.ps1
+          $installScript = @"
+          `$ErrorActionPreference = 'Stop'
+          `$toolsDir = "`$(Split-Path -parent `$MyInvocation.MyCommand.Definition)"
+          
+          `$packageArgs = @{
+            packageName    = "`$env:ChocolateyPackageName"
+            fileType      = 'exe'
+            file          = Join-Path `$toolsDir 'apidash.exe'
+            softwareName  = 'ApiDash*'
+            silentArgs    = '/S'
+          }
+          
+          Install-ChocolateyInstallPackage @packageArgs
+          "@
+          
+          Set-Content -Path "apidash/tools/chocolateyinstall.ps1" -Value $installScript
+          
+          # Update nuspec
+          $nuspec = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+            <metadata>
+              <id>apidash</id>
+              <version>${{ steps.get_version.outputs.VERSION }}</version>
+              <title>ApiDash</title>
+              <authors>foss42</authors>
+              <projectUrl>https://apidash.dev</projectUrl>
+              <licenseUrl>https://github.com/foss42/apidash/blob/main/LICENSE</licenseUrl>
+              <requireLicenseAcceptance>false</requireLicenseAcceptance>
+              <projectSourceUrl>https://github.com/foss42/apidash</projectSourceUrl>
+              <docsUrl>https://github.com/foss42/apidash/tree/main/doc</docsUrl>
+              <bugTrackerUrl>https://github.com/foss42/apidash/issues</bugTrackerUrl>
+              <tags>apidash api-client rest-client api-testing developer-tools</tags>
+              <summary>Modern API Client for Developers</summary>
+              <description>ApiDash is a modern, open source API client that helps developers test and debug APIs quickly and efficiently.</description>
+              <releaseNotes>https://github.com/foss42/apidash/releases/tag/v${{ steps.get_version.outputs.VERSION }}</releaseNotes>
+            </metadata>
+            <files>
+              <file src="tools\**" target="tools" />
+            </files>
+          </package>
+          "@
+          
+          Set-Content -Path "apidash/apidash.nuspec" -Value $nuspec
+          
+          # Copy release binary
+          Move-Item -Path "apidash.exe" -Destination "apidash/tools/"
+          
+          # Pack
+          cd apidash
+          choco pack
+        shell: pwsh
+
+      - name: Publish to Chocolatey
+        if: success()
+        run: |
+          cd choco/apidash
+          choco push apidash.${{ steps.get_version.outputs.VERSION }}.nupkg --source="https://push.chocolatey.org/" --api-key="${{ env.CHOCO_API_KEY }}"
+        shell: pwsh
